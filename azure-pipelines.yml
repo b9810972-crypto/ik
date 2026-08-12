@@ -13,627 +13,417 @@ steps:
     echo " Creating Python virtual environment"
     echo "========================================"
 
-    rm -rf "$HOME/maccontrol-venv"
-
     python3 -m venv "$HOME/maccontrol-venv"
-
     source "$HOME/maccontrol-venv/bin/activate"
 
     python -m pip install --upgrade pip
+    python -m pip install pyobjc-framework-Quartz Flask
 
-    python -m pip install \
-      pyobjc-framework-Quartz \
-      Flask
-
-    echo
-    echo "========================================"
-    echo " Installing GUI control components"
-    echo "========================================"
+    echo "Python packages installed."
 
     mkdir -p "$HOME/maccontrol"
     cd "$HOME/maccontrol"
 
-    cat > server.py <<'PY'
-import os
-import time
-import threading
-import secrets
-import subprocess
+    cat > server.py <<'PYTHON'
+    import os
+    import time
+    import threading
+    import secrets
+    import subprocess
 
-from flask import Flask, request, Response, render_template_string
-import Quartz
+    from flask import Flask, request, Response, render_template_string
+    import Quartz
 
+    app = Flask(__name__)
 
-app = Flask(__name__)
+    TOKEN = os.environ.get("CONTROL_TOKEN", "")
+    SCREEN = "/tmp/maccontrol-screen.png"
 
-TOKEN = os.environ.get("CONTROL_TOKEN", "")
-SCREEN = "/tmp/maccontrol-screen.png"
-
-
-HTML = r"""
-<!DOCTYPE html>
-<html>
-
-<head>
-
-<meta name="viewport"
-      content="width=device-width,initial-scale=1">
-
-<title>Azure macOS Control</title>
-
-<style>
-
-html,
-body {
-    margin: 0;
-    padding: 0;
-    background: #111;
-    color: white;
-    font-family: Arial, sans-serif;
-    overflow: hidden;
-}
-
-#bar {
-    height: 45px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 0 10px;
-    background: #222;
-    box-sizing: border-box;
-}
-
-#screen {
-    display: block;
-    max-width: 100vw;
-    max-height: calc(100vh - 45px);
-    margin: auto;
-    cursor: crosshair;
-    user-select: none;
-}
-
-input {
-    background: #333;
-    color: white;
-    border: 1px solid #555;
-    padding: 7px;
-    width: 220px;
-}
-
-button {
-    padding: 7px 12px;
-}
-
-</style>
-
-</head>
-
-
-<body>
-
-<div id="bar">
-
-    <b>macOS</b>
-
-    <input
-        id="text"
-        placeholder="Type text here"
-    >
-
-    <button onclick="sendText()">
-        Type
-    </button>
-
-    <span id="status">
-        connecting...
-    </span>
-
-</div>
-
-
-<img id="screen">
-
-
-<script>
-
-const token =
-    new URLSearchParams(
-        location.search
-    ).get("token") || "";
-
-
-const img =
-    document.getElementById("screen");
-
-
-const status =
-    document.getElementById("status");
-
-
-async function refresh() {
-
-    try {
-
-        const r = await fetch(
-            "/screen?token=" +
-            encodeURIComponent(token) +
-            "&t=" +
-            Date.now(),
-            {
-                cache: "no-store"
+    HTML = r"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta name="viewport" content="width=device-width,initial-scale=1">
+        <title>Azure macOS Control</title>
+        <style>
+            html, body {
+                margin: 0;
+                padding: 0;
+                background: #111;
+                color: white;
+                font-family: Arial, sans-serif;
+                overflow: hidden;
             }
-        );
 
-
-        if (!r.ok) {
-
-            status.textContent = "error";
-
-            return;
-        }
-
-
-        const blob =
-            await r.blob();
-
-
-        const oldSrc =
-            img.src;
-
-
-        img.src =
-            URL.createObjectURL(blob);
-
-
-        if (oldSrc.startsWith("blob:")) {
-
-            URL.revokeObjectURL(oldSrc);
-        }
-
-
-        status.textContent =
-            "connected";
-
-    } catch (e) {
-
-        status.textContent =
-            "disconnected";
-    }
-}
-
-
-setInterval(
-    refresh,
-    300
-);
-
-
-refresh();
-
-
-img.addEventListener(
-    "click",
-    async function(e) {
-
-        const rect =
-            img.getBoundingClientRect();
-
-
-        const naturalWidth =
-            img.naturalWidth;
-
-
-        const naturalHeight =
-            img.naturalHeight;
-
-
-        const x =
-            (e.clientX - rect.left) *
-            naturalWidth /
-            rect.width;
-
-
-        const y =
-            (e.clientY - rect.top) *
-            naturalHeight /
-            rect.height;
-
-
-        await fetch(
-            "/click?token=" +
-            encodeURIComponent(token),
-            {
-                method: "POST",
-
-                headers: {
-                    "Content-Type":
-                        "application/json"
-                },
-
-                body: JSON.stringify({
-                    x: x,
-                    y: y
-                })
+            #bar {
+                height: 45px;
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                padding: 0 10px;
+                background: #222;
+                box-sizing: border-box;
             }
-        );
-    }
-);
 
-
-async function sendText() {
-
-    const text =
-        document.getElementById(
-            "text"
-        ).value;
-
-
-    if (!text) {
-
-        return;
-    }
-
-
-    await fetch(
-        "/type?token=" +
-        encodeURIComponent(token),
-        {
-            method: "POST",
-
-            headers: {
-                "Content-Type":
-                    "application/json"
-            },
-
-            body: JSON.stringify({
-                text: text
-            })
-        }
-    );
-
-
-    document.getElementById(
-        "text"
-    ).value = "";
-}
-
-
-document.addEventListener(
-    "keydown",
-    async function(e) {
-
-        if (
-            e.target.tagName ===
-            "INPUT"
-        ) {
-
-            return;
-        }
-
-
-        e.preventDefault();
-
-
-        await fetch(
-            "/key?token=" +
-            encodeURIComponent(token),
-            {
-                method: "POST",
-
-                headers: {
-                    "Content-Type":
-                        "application/json"
-                },
-
-                body: JSON.stringify({
-                    key: e.key
-                })
+            #screen {
+                display: block;
+                max-width: 100vw;
+                max-height: calc(100vh - 45px);
+                margin: auto;
+                cursor: crosshair;
+                user-select: none;
             }
-        );
-    }
-);
 
-</script>
+            input {
+                background: #333;
+                color: white;
+                border: 1px solid #555;
+                padding: 7px;
+                width: 220px;
+            }
 
-</body>
+            button {
+                padding: 7px 12px;
+            }
+        </style>
+    </head>
 
-</html>
-"""
+    <body>
 
+        <div id="bar">
+            <b>macOS</b>
 
-def authorized():
+            <input
+                id="text"
+                placeholder="Type text here"
+            >
 
-    supplied = request.args.get(
-        "token",
-        ""
-    )
+            <button onclick="sendText()">
+                Type
+            </button>
 
-    return (
-        TOKEN != "" and
-        secrets.compare_digest(
-            supplied,
-            TOKEN
+            <span id="status">
+                connecting...
+            </span>
+        </div>
+
+        <img id="screen">
+
+        <script>
+            const token =
+                new URLSearchParams(location.search).get("token") || "";
+
+            const img =
+                document.getElementById("screen");
+
+            const status =
+                document.getElementById("status");
+
+            async function refresh() {
+                try {
+                    const response = await fetch(
+                        "/screen?token=" +
+                        encodeURIComponent(token) +
+                        "&t=" +
+                        Date.now(),
+                        {
+                            cache: "no-store"
+                        }
+                    );
+
+                    if (!response.ok) {
+                        status.textContent = "error";
+                        return;
+                    }
+
+                    const blob = await response.blob();
+                    const oldSource = img.src;
+
+                    img.src = URL.createObjectURL(blob);
+
+                    if (oldSource.startsWith("blob:")) {
+                        URL.revokeObjectURL(oldSource);
+                    }
+
+                    status.textContent = "connected";
+
+                } catch (error) {
+                    status.textContent = "disconnected";
+                }
+            }
+
+            setInterval(refresh, 300);
+            refresh();
+
+            img.addEventListener("click", async function(event) {
+
+                const rect =
+                    img.getBoundingClientRect();
+
+                const naturalWidth =
+                    img.naturalWidth;
+
+                const naturalHeight =
+                    img.naturalHeight;
+
+                const x =
+                    (event.clientX - rect.left) *
+                    naturalWidth /
+                    rect.width;
+
+                const y =
+                    (event.clientY - rect.top) *
+                    naturalHeight /
+                    rect.height;
+
+                await fetch(
+                    "/click?token=" +
+                    encodeURIComponent(token),
+                    {
+                        method: "POST",
+                        headers: {
+                            "Content-Type":
+                                "application/json"
+                        },
+                        body: JSON.stringify({
+                            x: x,
+                            y: y
+                        })
+                    }
+                );
+            });
+
+            async function sendText() {
+
+                const input =
+                    document.getElementById("text");
+
+                const text =
+                    input.value;
+
+                if (!text) {
+                    return;
+                }
+
+                await fetch(
+                    "/type?token=" +
+                    encodeURIComponent(token),
+                    {
+                        method: "POST",
+                        headers: {
+                            "Content-Type":
+                                "application/json"
+                        },
+                        body: JSON.stringify({
+                            text: text
+                        })
+                    }
+                );
+
+                input.value = "";
+            }
+
+            document.addEventListener(
+                "keydown",
+                async function(event) {
+
+                    if (
+                        event.target.tagName === "INPUT"
+                    ) {
+                        return;
+                    }
+
+                    event.preventDefault();
+
+                    await fetch(
+                        "/key?token=" +
+                        encodeURIComponent(token),
+                        {
+                            method: "POST",
+                            headers: {
+                                "Content-Type":
+                                    "application/json"
+                            },
+                            body: JSON.stringify({
+                                key: event.key
+                            })
+                        }
+                    );
+                }
+            );
+        </script>
+
+    </body>
+    </html>
+    """
+
+    def authorized():
+        supplied = request.args.get("token", "")
+
+        return (
+            TOKEN != "" and
+            secrets.compare_digest(supplied, TOKEN)
         )
-    )
 
+    def screenshot_loop():
+        while True:
+            try:
+                subprocess.run(
+                    [
+                        "screencapture",
+                        "-x",
+                        SCREEN
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5
+                )
+            except Exception:
+                pass
 
-def screenshot_loop():
+            time.sleep(0.20)
 
-    while True:
+    def click(x, y):
+        point = Quartz.CGPoint(
+            float(x),
+            float(y)
+        )
 
-        try:
-
-            subprocess.run(
-                [
-                    "screencapture",
-                    "-x",
-                    SCREEN
-                ],
-
-                stdout=subprocess.DEVNULL,
-
-                stderr=subprocess.DEVNULL,
-
-                timeout=5
-            )
-
-        except Exception:
-
-            pass
-
-
-        time.sleep(0.20)
-
-
-def click(x, y):
-
-    point = Quartz.CGPoint(
-        float(x),
-        float(y)
-    )
-
-
-    down =
-        Quartz.CGEventCreateMouseEvent(
+        down = Quartz.CGEventCreateMouseEvent(
             None,
             Quartz.kCGEventLeftMouseDown,
             point,
             Quartz.kCGMouseButtonLeft
         )
 
-
-    up =
-        Quartz.CGEventCreateMouseEvent(
+        up = Quartz.CGEventCreateMouseEvent(
             None,
             Quartz.kCGEventLeftMouseUp,
             point,
             Quartz.kCGMouseButtonLeft
         )
 
+        Quartz.CGEventPost(
+            Quartz.kCGHIDEventTap,
+            down
+        )
 
-    Quartz.CGEventPost(
-        Quartz.kCGHIDEventTap,
-        down
-    )
+        Quartz.CGEventPost(
+            Quartz.kCGHIDEventTap,
+            up
+        )
 
+    def type_unicode(text):
+        if not text:
+            return
 
-    Quartz.CGEventPost(
-        Quartz.kCGHIDEventTap,
-        up
-    )
-
-
-def type_unicode(text):
-
-    if not text:
-
-        return
-
-
-    event =
-        Quartz.CGEventCreateKeyboardEvent(
+        event = Quartz.CGEventCreateKeyboardEvent(
             None,
             0,
             True
         )
 
-
-    Quartz.CGEventKeyboardSetUnicodeString(
-        event,
-        len(text),
-        text
-    )
-
-
-    Quartz.CGEventPost(
-        Quartz.kCGHIDEventTap,
-        event
-    )
-
-
-@app.route("/")
-def index():
-
-    if not authorized():
-
-        return (
-            "Unauthorized",
-            401
-        )
-
-
-    return render_template_string(
-        HTML
-    )
-
-
-@app.route("/screen")
-def screen():
-
-    if not authorized():
-
-        return (
-            "Unauthorized",
-            401
-        )
-
-
-    try:
-
-        with open(
-            SCREEN,
-            "rb"
-        ) as f:
-
-            data = f.read()
-
-
-        return Response(
-            data,
-
-            mimetype="image/png",
-
-            headers={
-                "Cache-Control":
-                    "no-store"
-            }
-        )
-
-    except Exception:
-
-        return (
-            "No screenshot",
-            503
-        )
-
-
-@app.route(
-    "/click",
-    methods=["POST"]
-)
-def click_route():
-
-    if not authorized():
-
-        return (
-            "Unauthorized",
-            401
-        )
-
-
-    data =
-        request.get_json()
-
-
-    click(
-        data["x"],
-        data["y"]
-    )
-
-
-    return "OK"
-
-
-@app.route(
-    "/type",
-    methods=["POST"]
-)
-def type_route():
-
-    if not authorized():
-
-        return (
-            "Unauthorized",
-            401
-        )
-
-
-    data =
-        request.get_json()
-
-
-    type_unicode(
-        data.get(
-            "text",
-            ""
-        )
-    )
-
-
-    return "OK"
-
-
-@app.route(
-    "/key",
-    methods=["POST"]
-)
-def key_route():
-
-    if not authorized():
-
-        return (
-            "Unauthorized",
-            401
-        )
-
-
-    data =
-        request.get_json()
-
-
-    key =
-        data.get(
-            "key",
-            ""
-        )
-
-
-    special = {
-
-        "Enter": "\r",
-
-        "Tab": "\t",
-
-        "Backspace": "\b",
-
-        "Escape": "\x1b",
-
-        " ": " "
-    }
-
-
-    text =
-        special.get(
-            key,
-            key
-        )
-
-
-    if text:
-
-        type_unicode(
+        Quartz.CGEventKeyboardSetUnicodeString(
+            event,
+            len(text),
             text
         )
 
+        Quartz.CGEventPost(
+            Quartz.kCGHIDEventTap,
+            event
+        )
 
-    return "OK"
+    @app.route("/")
+    def index():
+        if not authorized():
+            return "Unauthorized", 401
 
+        return render_template_string(HTML)
 
-threading.Thread(
-    target=screenshot_loop,
-    daemon=True
-).start()
+    @app.route("/screen")
+    def screen():
+        if not authorized():
+            return "Unauthorized", 401
 
+        try:
+            with open(SCREEN, "rb") as file:
+                data = file.read()
 
-app.run(
-    host="127.0.0.1",
-    port=8080,
-    threaded=True
-)
-PY
+            return Response(
+                data,
+                mimetype="image/png",
+                headers={
+                    "Cache-Control": "no-store"
+                }
+            )
 
+        except Exception:
+            return "No screenshot", 503
 
-    echo
+    @app.route("/click", methods=["POST"])
+    def click_route():
+        if not authorized():
+            return "Unauthorized", 401
+
+        data = request.get_json()
+
+        click(
+            data["x"],
+            data["y"]
+        )
+
+        return "OK"
+
+    @app.route("/type", methods=["POST"])
+    def type_route():
+        if not authorized():
+            return "Unauthorized", 401
+
+        data = request.get_json()
+
+        type_unicode(
+            data.get("text", "")
+        )
+
+        return "OK"
+
+    @app.route("/key", methods=["POST"])
+    def key_route():
+        if not authorized():
+            return "Unauthorized", 401
+
+        data = request.get_json()
+
+        key = data.get("key", "")
+
+        special = {
+            "Enter": "\r",
+            "Tab": "\t",
+            "Backspace": "\b",
+            "Escape": "\x1b",
+            " ": " "
+        }
+
+        text = special.get(key, key)
+
+        if text:
+            type_unicode(text)
+
+        return "OK"
+
+    threading.Thread(
+        target=screenshot_loop,
+        daemon=True
+    ).start()
+
+    app.run(
+        host="127.0.0.1",
+        port=8080,
+        threaded=True
+    )
+    PYTHON
+
     echo "========================================"
     echo " Checking Python syntax"
     echo "========================================"
@@ -642,151 +432,107 @@ PY
 
     echo "Python syntax check passed."
 
+    echo "========================================"
+    echo " Generating access token"
+    echo "========================================"
 
-    TOKEN=$(python - <<'PY'
-import secrets
-print(secrets.token_urlsafe(32))
-PY
-    )
+    TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
 
     export CONTROL_TOKEN="$TOKEN"
 
-
-    echo
     echo "========================================"
     echo " Starting macOS GUI controller"
     echo "========================================"
 
-
     python server.py \
       > "$HOME/maccontrol/server.log" 2>&1 &
 
-
     SERVER_PID=$!
-
 
     sleep 5
 
-
-    echo
     echo "========================================"
-    echo " Testing GUI server"
+    echo " Checking GUI server"
     echo "========================================"
 
-
-    if kill -0 "$SERVER_PID" 2>/dev/null; then
-
-        echo "GUI server process is running."
-
-    else
-
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
         echo "GUI server failed to start."
-
         cat "$HOME/maccontrol/server.log"
-
         exit 1
-
     fi
 
+    echo "GUI server is running."
 
-    echo
     echo "========================================"
     echo " Testing screenshot"
     echo "========================================"
 
-
     if [ -f /tmp/maccontrol-screen.png ]; then
-
         file /tmp/maccontrol-screen.png
 
         sips \
           -g pixelWidth \
           -g pixelHeight \
           /tmp/maccontrol-screen.png
-
     else
-
         echo "WARNING: screenshot has not been created."
-
         echo "macOS may require Screen Recording permission."
-
     fi
 
-
-    echo
     echo "========================================"
     echo " Installing cloudflared"
     echo "========================================"
-
 
     curl -L \
       --fail \
       https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64.tgz \
       -o "$HOME/cloudflared.tgz"
 
-
     mkdir -p "$HOME/cloudflared"
-
 
     tar -xzf \
       "$HOME/cloudflared.tgz" \
       -C "$HOME/cloudflared"
 
-
     chmod +x \
       "$HOME/cloudflared/cloudflared"
 
-
-    echo
     echo "========================================"
     echo " Starting public tunnel"
     echo "========================================"
-
 
     "$HOME/cloudflared/cloudflared" \
       tunnel \
       --url http://127.0.0.1:8080 \
       > "$HOME/cloudflared.log" 2>&1 &
 
-
     TUNNEL_PID=$!
 
-
-    echo
     echo "Waiting for tunnel URL..."
-
 
     URL=""
 
-
     for i in $(seq 1 60); do
 
-        URL=$(
+        URL="$(
             grep -oE \
               'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
               "$HOME/cloudflared.log" |
             head -1 ||
             true
-        )
-
+        )"
 
         if [ -n "$URL" ]; then
-
             break
-
         fi
 
-
         sleep 2
-
     done
-
 
     echo
     echo "========================================"
     echo "        MAC DESKTOP CONTROL"
     echo "========================================"
-
 
     if [ -n "$URL" ]; then
 
@@ -799,53 +545,41 @@ PY
     else
 
         echo "Tunnel URL was not detected."
-
         echo
-
         cat "$HOME/cloudflared.log"
 
     fi
-
 
     echo
     echo "========================================"
     echo " Server log"
     echo "========================================"
 
-
     tail -50 \
       "$HOME/maccontrol/server.log" ||
       true
-
 
     echo
     echo "========================================"
     echo " RUNNING"
     echo "========================================"
 
-
     while true; do
 
-        if ! kill -0 \
-            "$SERVER_PID" \
-            2>/dev/null; then
+        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
 
             echo "GUI server stopped."
 
             echo
-
-            cat \
-              "$HOME/maccontrol/server.log"
+            cat "$HOME/maccontrol/server.log"
 
             exit 1
 
         fi
-
 
         sleep 10
 
     done
 
   displayName: "Start browser-controlled macOS desktop"
-
   timeoutInMinutes: 55
