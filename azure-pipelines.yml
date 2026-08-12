@@ -10,12 +10,23 @@ steps:
     set -e
 
     echo "========================================"
-    echo " Installing GUI control components"
+    echo " Creating Python virtual environment"
     echo "========================================"
 
-    python3 -m pip install --user \
+    python3 -m venv "$HOME/maccontrol-venv"
+
+    source "$HOME/maccontrol-venv/bin/activate"
+
+    python -m pip install --upgrade pip
+
+    python -m pip install \
       pyobjc-framework-Quartz \
       Flask
+
+    echo
+    echo "========================================"
+    echo " Installing GUI control components"
+    echo "========================================"
 
     mkdir -p "$HOME/maccontrol"
     cd "$HOME/maccontrol"
@@ -41,6 +52,7 @@ steps:
     <head>
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <title>Azure macOS Control</title>
+
     <style>
     html,body {
         margin:0;
@@ -88,9 +100,15 @@ steps:
 
     <div id="bar">
         <b>macOS</b>
-        <input id="text" placeholder="Type text here">
+
+        <input
+            id="text"
+            placeholder="Type text here"
+        >
+
         <button onclick="sendText()">Type</button>
-        <span id="status">connected</span>
+
+        <span id="status">connecting...</span>
     </div>
 
     <img id="screen">
@@ -99,62 +117,99 @@ steps:
     const token =
         new URLSearchParams(location.search).get("token") || "";
 
-    const img = document.getElementById("screen");
-    const status = document.getElementById("status");
+    const img =
+        document.getElementById("screen");
+
+    const status =
+        document.getElementById("status");
+
 
     async function refresh() {
+
         try {
+
             const r = await fetch(
                 "/screen?token=" +
                 encodeURIComponent(token) +
-                "&t=" + Date.now()
+                "&t=" + Date.now(),
+                {
+                    cache:"no-store"
+                }
             );
 
-            if (r.ok) {
-                const blob = await r.blob();
+            if (!r.ok) {
 
-                if (img.src.startsWith("blob:")) {
-                    URL.revokeObjectURL(img.src);
-                }
-
-                img.src = URL.createObjectURL(blob);
-                status.textContent = "connected";
-            } else {
                 status.textContent = "error";
+                return;
+
             }
+
+            const blob = await r.blob();
+
+            const oldSrc = img.src;
+
+            img.src = URL.createObjectURL(blob);
+
+            if (oldSrc.startsWith("blob:")) {
+                URL.revokeObjectURL(oldSrc);
+            }
+
+            status.textContent = "connected";
+
         } catch(e) {
+
             status.textContent = "disconnected";
+
         }
     }
 
+
     setInterval(refresh, 300);
+
     refresh();
 
-    img.addEventListener("click", async function(e) {
 
-        const rect = img.getBoundingClientRect();
+    img.addEventListener(
+        "click",
+        async function(e) {
 
-        const naturalWidth = img.naturalWidth;
-        const naturalHeight = img.naturalHeight;
+            const rect =
+                img.getBoundingClientRect();
 
-        const x = (e.clientX - rect.left) *
-                  naturalWidth / rect.width;
+            const naturalWidth =
+                img.naturalWidth;
 
-        const y = (e.clientY - rect.top) *
-                  naturalHeight / rect.height;
+            const naturalHeight =
+                img.naturalHeight;
 
-        await fetch(
-            "/click?token=" + encodeURIComponent(token),
-            {
-                method:"POST",
-                headers:{"Content-Type":"application/json"},
-                body:JSON.stringify({
-                    x:x,
-                    y:y
-                })
-            }
-        );
-    });
+            const x =
+                (e.clientX - rect.left) *
+                naturalWidth /
+                rect.width;
+
+            const y =
+                (e.clientY - rect.top) *
+                naturalHeight /
+                rect.height;
+
+            await fetch(
+                "/click?token=" +
+                encodeURIComponent(token),
+                {
+                    method:"POST",
+                    headers:{
+                        "Content-Type":
+                        "application/json"
+                    },
+                    body:JSON.stringify({
+                        x:x,
+                        y:y
+                    })
+                }
+            );
+        }
+    );
+
 
     async function sendText() {
 
@@ -165,50 +220,68 @@ steps:
             return;
 
         await fetch(
-            "/type?token=" + encodeURIComponent(token),
+            "/type?token=" +
+            encodeURIComponent(token),
             {
                 method:"POST",
-                headers:{"Content-Type":"application/json"},
+                headers:{
+                    "Content-Type":
+                    "application/json"
+                },
                 body:JSON.stringify({
                     text:text
                 })
             }
         );
 
-        document.getElementById("text").value="";
+        document.getElementById("text").value = "";
+
     }
 
-    document.addEventListener("keydown", async function(e) {
 
-        if (e.target.tagName === "INPUT")
-            return;
+    document.addEventListener(
+        "keydown",
+        async function(e) {
 
-        e.preventDefault();
+            if (e.target.tagName === "INPUT")
+                return;
 
-        await fetch(
-            "/key?token=" + encodeURIComponent(token),
-            {
-                method:"POST",
-                headers:{"Content-Type":"application/json"},
-                body:JSON.stringify({
-                    key:e.key
-                })
-            }
-        );
-    });
+            e.preventDefault();
+
+            await fetch(
+                "/key?token=" +
+                encodeURIComponent(token),
+                {
+                    method:"POST",
+                    headers:{
+                        "Content-Type":
+                        "application/json"
+                    },
+                    body:JSON.stringify({
+                        key:e.key
+                    })
+                }
+            );
+        }
+    );
     </script>
 
     </body>
     </html>
     """
 
+
     def authorized():
 
-        supplied = request.args.get("token", "")
+        supplied =
+            request.args.get("token", "")
 
         return (
             TOKEN != "" and
-            secrets.compare_digest(supplied, TOKEN)
+            secrets.compare_digest(
+                supplied,
+                TOKEN
+            )
         )
 
 
@@ -314,11 +387,13 @@ steps:
                 data,
                 mimetype="image/png",
                 headers={
-                    "Cache-Control":"no-store"
+                    "Cache-Control":
+                    "no-store"
                 }
             )
 
         except Exception:
+
             return "No screenshot", 503
 
 
@@ -392,7 +467,7 @@ steps:
     )
     PY
 
-    TOKEN=$(python3 - <<'PY'
+    TOKEN=$(python - <<'PY'
     import secrets
     print(secrets.token_urlsafe(32))
     PY
@@ -405,7 +480,7 @@ steps:
     echo " Starting macOS GUI controller"
     echo "========================================"
 
-    python3 server.py \
+    python server.py \
       > "$HOME/maccontrol/server.log" 2>&1 &
 
     SERVER_PID=$!
