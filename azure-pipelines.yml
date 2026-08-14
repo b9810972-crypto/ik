@@ -1,7 +1,7 @@
 trigger: none
 
 pool:
-  vmImage: macOS-15
+  vmImage: macos-26-arm64-xl
 
 steps:
 - checkout: none
