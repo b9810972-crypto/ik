@@ -1,6 +1,6 @@
 pool:
   name: 'GitHub-hosted Agents'
-  vmImage: 'macos-26-arm64'
+  vmImage: 'macos-26-arm64-xl'
 
 steps:
 - checkout: none
