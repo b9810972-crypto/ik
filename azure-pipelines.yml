@@ -9,473 +9,380 @@ steps:
     set -euo pipefail
 
     echo "========================================"
-    echo "        MACOS MACHINE INFORMATION"
+    echo " macOS information"
     echo "========================================"
 
-    sw_vers
     uname -m
-    system_profiler SPHardwareDataType || true
-    echo
-    echo "User: $(whoami)"
-    echo "HOME: $HOME"
-    echo
+    sw_vers
+    whoami
 
     echo "========================================"
-    echo " Creating Python virtual environment"
+    echo " Installing Python packages"
     echo "========================================"
 
     python3 -m venv "$HOME/maccontrol-venv"
     source "$HOME/maccontrol-venv/bin/activate"
 
     python -m pip install --upgrade pip
-    python -m pip install pyobjc-framework-Quartz Flask
-
-    echo "Python packages installed."
+    python -m pip install Flask pyobjc-framework-Quartz
 
     mkdir -p "$HOME/maccontrol"
     cd "$HOME/maccontrol"
 
     cat > server.py <<'PYTHON'
-import os
-import time
-import threading
-import secrets
-import subprocess
-import sys
-
-from flask import Flask, request, Response, render_template_string
-import Quartz
-
-app = Flask(__name__)
-
-TOKEN = os.environ.get("CONTROL_TOKEN", "")
-SCREEN = "/tmp/maccontrol-screen.png"
-
-HTML = r"""
-<!DOCTYPE html>
-<html>
-<head>
-    <meta name="viewport" content="width=device-width,initial-scale=1">
-    <title>macOS Control</title>
-
-    <style>
-        html, body {
-            margin: 0;
-            padding: 0;
-            background: #111;
-            color: white;
-            font-family: Arial, sans-serif;
-            overflow: hidden;
-            height: 100%;
-        }
-
-        #bar {
-            height: 45px;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 0 10px;
-            background: #222;
-            box-sizing: border-box;
-        }
-
-        #screen {
-            display: block;
-            max-width: 100vw;
-            max-height: calc(100vh - 45px);
-            margin: auto;
-            cursor: crosshair;
-            user-select: none;
-            -webkit-user-drag: none;
-        }
-
-        input {
-            background: #333;
-            color: white;
-            border: 1px solid #555;
-            padding: 7px;
-            width: 220px;
-        }
-
-        button {
-            padding: 7px 12px;
-            cursor: pointer;
-        }
-    </style>
-</head>
-
-<body>
-
-<div id="bar">
-    <b>macOS</b>
-
-    <input id="text" placeholder="Type text here">
-
-    <button onclick="sendText()">Type</button>
-
-    <span id="status">connecting...</span>
-</div>
-
-<img id="screen" draggable="false">
-
-<script>
-const token =
-    new URLSearchParams(location.search).get("token") || "";
-
-const img =
-    document.getElementById("screen");
-
-const status =
-    document.getElementById("status");
-
-let refreshing = false;
-
-async function refresh() {
-    if (refreshing) return;
-
-    refreshing = true;
-
-    try {
-        const response = await fetch(
-            "/screen?token=" +
-            encodeURIComponent(token) +
-            "&t=" +
-            Date.now(),
-            {
-                cache: "no-store"
-            }
-        );
-
-        if (!response.ok) {
-            status.textContent = "error";
-            return;
-        }
-
-        const blob = await response.blob();
-        const oldSource = img.src;
-
-        img.src = URL.createObjectURL(blob);
-
-        if (oldSource.startsWith("blob:")) {
-            URL.revokeObjectURL(oldSource);
-        }
-
-        status.textContent = "connected";
-
-    } catch (error) {
-        status.textContent = "disconnected";
-    } finally {
-        refreshing = false;
-    }
-}
-
-setInterval(refresh, 350);
-refresh();
-
-img.addEventListener("click", async function(event) {
-
-    const rect =
-        img.getBoundingClientRect();
-
-    if (!img.naturalWidth || !img.naturalHeight) {
-        return;
-    }
-
-    const x =
-        (event.clientX - rect.left) *
-        img.naturalWidth /
-        rect.width;
-
-    const y =
-        (event.clientY - rect.top) *
-        img.naturalHeight /
-        rect.height;
-
-    await fetch(
-        "/click?token=" +
-        encodeURIComponent(token),
-        {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                x: x,
-                y: y
-            })
-        }
-    );
-});
-
-async function sendText() {
-
-    const input =
-        document.getElementById("text");
-
-    const text =
-        input.value;
-
-    if (!text) {
-        return;
-    }
-
-    await fetch(
-        "/type?token=" +
-        encodeURIComponent(token),
-        {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                text: text
-            })
-        }
-    );
-
-    input.value = "";
-}
-
-document.addEventListener(
-    "keydown",
-    async function(event) {
-
-        if (event.target.tagName === "INPUT") {
-            return;
-        }
-
-        event.preventDefault();
-
-        await fetch(
-            "/key?token=" +
-            encodeURIComponent(token),
-            {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({
-                    key: event.key
-                })
-            }
-        );
-    }
-);
-</script>
-
-</body>
-</html>
-"""
-
-def authorized():
-    supplied = request.args.get("token", "")
-
-    return (
-        TOKEN != "" and
-        secrets.compare_digest(supplied, TOKEN)
-    )
-
-def screenshot_loop():
-    while True:
-        try:
-            result = subprocess.run(
-                [
-                    "/usr/sbin/screencapture",
-                    "-x",
-                    SCREEN
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                timeout=5
-            )
-
-            if result.returncode != 0:
-                error = result.stderr.decode(
-                    errors="replace"
-                ).strip()
-
-                if error:
-                    print(
-                        "screencapture:",
-                        error,
-                        flush=True
-                    )
-
-        except Exception as exc:
-            print(
-                "Screenshot error:",
-                repr(exc),
-                flush=True
-            )
-
-        time.sleep(0.25)
-
-def post_mouse_event(event_type, x, y):
-    point = Quartz.CGPoint(
-        float(x),
-        float(y)
-    )
-
-    event = Quartz.CGEventCreateMouseEvent(
-        None,
-        event_type,
-        point,
-        Quartz.kCGMouseButtonLeft
-    )
-
-    Quartz.CGEventPost(
-        Quartz.kCGHIDEventTap,
-        event
-    )
-
-def click(x, y):
-
-    post_mouse_event(
-        Quartz.kCGEventLeftMouseDown,
-        x,
-        y
-    )
-
-    time.sleep(0.03)
-
-    post_mouse_event(
-        Quartz.kCGEventLeftMouseUp,
-        x,
-        y
-    )
-
-def type_unicode(text):
-
-    if not text:
-        return
-
-    for char in text:
-
-        event = Quartz.CGEventCreateKeyboardEvent(
-            None,
-            0,
-            True
+    import os
+    import time
+    import threading
+    import secrets
+    import subprocess
+
+    from flask import Flask, request, Response
+    import Quartz
+
+    app = Flask(__name__)
+
+    TOKEN = os.environ["CONTROL_TOKEN"]
+    SCREEN = "/tmp/maccontrol-screen.png"
+
+    def authorized():
+        supplied = request.args.get("token", "")
+        return (
+            TOKEN and
+            secrets.compare_digest(supplied, TOKEN)
         )
 
-        Quartz.CGEventKeyboardSetUnicodeString(
-            event,
-            1,
-            char
+    def screenshot_loop():
+        while True:
+            try:
+                subprocess.run(
+                    ["/usr/sbin/screencapture", "-x", SCREEN],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5
+                )
+            except Exception:
+                pass
+
+            time.sleep(0.3)
+
+    def click(x, y):
+        point = Quartz.CGPoint(
+            float(x),
+            float(y)
+        )
+
+        down = Quartz.CGEventCreateMouseEvent(
+            None,
+            Quartz.kCGEventLeftMouseDown,
+            point,
+            Quartz.kCGMouseButtonLeft
+        )
+
+        up = Quartz.CGEventCreateMouseEvent(
+            None,
+            Quartz.kCGEventLeftMouseUp,
+            point,
+            Quartz.kCGMouseButtonLeft
         )
 
         Quartz.CGEventPost(
             Quartz.kCGHIDEventTap,
-            event
+            down
         )
 
-        time.sleep(0.005)
-
-@app.route("/")
-def index():
-
-    if not authorized():
-        return "Unauthorized", 401
-
-    return render_template_string(HTML)
-
-@app.route("/screen")
-def screen():
-
-    if not authorized():
-        return "Unauthorized", 401
-
-    try:
-        with open(SCREEN, "rb") as file:
-            data = file.read()
-
-        return Response(
-            data,
-            mimetype="image/png",
-            headers={
-                "Cache-Control": "no-store"
-            }
+        Quartz.CGEventPost(
+            Quartz.kCGHIDEventTap,
+            up
         )
 
-    except FileNotFoundError:
-        return "No screenshot", 503
+    def type_text(text):
+        for char in text:
+            event = Quartz.CGEventCreateKeyboardEvent(
+                None,
+                0,
+                True
+            )
 
-    except Exception as exc:
-        print(
-            "Screen error:",
-            repr(exc),
-            file=sys.stderr,
-            flush=True
+            Quartz.CGEventKeyboardSetUnicodeString(
+                event,
+                1,
+                char
+            )
+
+            Quartz.CGEventPost(
+                Quartz.kCGHIDEventTap,
+                event
+            )
+
+            time.sleep(0.005)
+
+    @app.route("/")
+    def index():
+        if not authorized():
+            return "Unauthorized", 401
+
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta name="viewport"
+                  content="width=device-width,initial-scale=1">
+
+            <title>macOS Control</title>
+
+            <style>
+                html, body {
+                    margin: 0;
+                    padding: 0;
+                    background: #111;
+                    color: white;
+                    font-family: Arial, sans-serif;
+                }
+
+                #bar {
+                    height: 50px;
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    padding: 0 10px;
+                    background: #222;
+                }
+
+                #screen {
+                    display: block;
+                    max-width: 100vw;
+                    max-height: calc(100vh - 50px);
+                    margin: auto;
+                    cursor: crosshair;
+                    user-select: none;
+                }
+
+                input {
+                    background: #333;
+                    color: white;
+                    border: 1px solid #555;
+                    padding: 7px;
+                    width: 220px;
+                }
+
+                button {
+                    padding: 7px 12px;
+                }
+            </style>
+        </head>
+
+        <body>
+            <div id="bar">
+                <b>macOS</b>
+
+                <input id="text"
+                       placeholder="Type text">
+
+                <button onclick="sendText()">
+                    Type
+                </button>
+
+                <span id="status">
+                    Connecting...
+                </span>
+            </div>
+
+            <img id="screen"
+                 draggable="false">
+
+            <script>
+                const token =
+                    new URLSearchParams(location.search)
+                    .get("token") || "";
+
+                const img =
+                    document.getElementById("screen");
+
+                const status =
+                    document.getElementById("status");
+
+                async function refresh() {
+                    try {
+                        const r = await fetch(
+                            "/screen?token=" +
+                            encodeURIComponent(token) +
+                            "&t=" +
+                            Date.now(),
+                            { cache: "no-store" }
+                        );
+
+                        if (!r.ok) {
+                            status.textContent = "Error";
+                            return;
+                        }
+
+                        const blob = await r.blob();
+
+                        const old = img.src;
+
+                        img.src =
+                            URL.createObjectURL(blob);
+
+                        if (old.startsWith("blob:")) {
+                            URL.revokeObjectURL(old);
+                        }
+
+                        status.textContent =
+                            "Connected";
+
+                    } catch (e) {
+                        status.textContent =
+                            "Disconnected";
+                    }
+                }
+
+                setInterval(refresh, 300);
+                refresh();
+
+                img.addEventListener(
+                    "click",
+                    async function(event) {
+
+                        const rect =
+                            img.getBoundingClientRect();
+
+                        const x =
+                            (event.clientX - rect.left) *
+                            img.naturalWidth /
+                            rect.width;
+
+                        const y =
+                            (event.clientY - rect.top) *
+                            img.naturalHeight /
+                            rect.height;
+
+                        await fetch(
+                            "/click?token=" +
+                            encodeURIComponent(token),
+                            {
+                                method: "POST",
+                                headers: {
+                                    "Content-Type":
+                                        "application/json"
+                                },
+                                body: JSON.stringify({
+                                    x: x,
+                                    y: y
+                                })
+                            }
+                        );
+                    }
+                );
+
+                async function sendText() {
+                    const input =
+                        document.getElementById("text");
+
+                    const text = input.value;
+
+                    if (!text) {
+                        return;
+                    }
+
+                    await fetch(
+                        "/type?token=" +
+                        encodeURIComponent(token),
+                        {
+                            method: "POST",
+                            headers: {
+                                "Content-Type":
+                                    "application/json"
+                            },
+                            body: JSON.stringify({
+                                text: text
+                            })
+                        }
+                    );
+
+                    input.value = "";
+                }
+
+                document.addEventListener(
+                    "keydown",
+                    async function(event) {
+
+                        if (
+                            event.target.tagName ===
+                            "INPUT"
+                        ) {
+                            return;
+                        }
+
+                        event.preventDefault();
+
+                        await fetch(
+                            "/type?token=" +
+                            encodeURIComponent(token),
+                            {
+                                method: "POST",
+                                headers: {
+                                    "Content-Type":
+                                        "application/json"
+                                },
+                                body: JSON.stringify({
+                                    text: event.key
+                                })
+                            }
+                        );
+                    }
+                );
+            </script>
+        </body>
+        </html>
+        """
+
+    @app.route("/screen")
+    def screen():
+        if not authorized():
+            return "Unauthorized", 401
+
+        try:
+            with open(SCREEN, "rb") as f:
+                data = f.read()
+
+            return Response(
+                data,
+                mimetype="image/png",
+                headers={
+                    "Cache-Control":
+                        "no-store"
+                }
+            )
+
+        except FileNotFoundError:
+            return "No screenshot", 503
+
+    @app.route("/click", methods=["POST"])
+    def click_route():
+        if not authorized():
+            return "Unauthorized", 401
+
+        data = request.get_json()
+
+        click(
+            data["x"],
+            data["y"]
         )
 
-        return "Screenshot error", 500
+        return "OK"
 
-@app.route("/click", methods=["POST"])
-def click_route():
+    @app.route("/type", methods=["POST"])
+    def type_route():
+        if not authorized():
+            return "Unauthorized", 401
 
-    if not authorized():
-        return "Unauthorized", 401
+        data = request.get_json()
 
-    data = request.get_json(
-        silent=True
-    ) or {}
+        type_text(
+            data.get("text", "")
+        )
 
-    if "x" not in data or "y" not in data:
-        return "Invalid coordinates", 400
-
-    click(
-        data["x"],
-        data["y"]
-    )
-
-    return "OK"
-
-@app.route("/type", methods=["POST"])
-def type_route():
-
-    if not authorized():
-        return "Unauthorized", 401
-
-    data = request.get_json(
-        silent=True
-    ) or {}
-
-    type_unicode(
-        data.get("text", "")
-    )
-
-    return "OK"
-
-@app.route("/key", methods=["POST"])
-def key_route():
-
-    if not authorized():
-        return "Unauthorized", 401
-
-    data = request.get_json(
-        silent=True
-    ) or {}
-
-    key = data.get("key", "")
-
-    special = {
-        "Enter": "\r",
-        "Tab": "\t",
-        "Backspace": "\b",
-        "Escape": "\x1b",
-        " ": " "
-    }
-
-    text = special.get(
-        key,
-        key
-    )
-
-    if text:
-        type_unicode(text)
-
-    return "OK"
-
-if __name__ == "__main__":
+        return "OK"
 
     threading.Thread(
         target=screenshot_loop,
@@ -487,54 +394,26 @@ if __name__ == "__main__":
         port=8080,
         threaded=True
     )
-PYTHON
+    PYTHON
 
-    echo
     echo "========================================"
-    echo " Checking Python syntax"
+    echo " Checking Python"
     echo "========================================"
 
     python -m py_compile server.py
 
-    echo "Python syntax check passed."
+    echo "Python syntax OK."
 
-    echo
     echo "========================================"
-    echo " Testing macOS screen capture"
-    echo "========================================"
-
-    /usr/sbin/screencapture \
-      -x \
-      /tmp/pretest-screen.png \
-      || true
-
-    if [ -f /tmp/pretest-screen.png ]; then
-        echo "Screenshot created successfully."
-
-        sips \
-          -g pixelWidth \
-          -g pixelHeight \
-          /tmp/pretest-screen.png \
-          || true
-    else
-        echo "WARNING: macOS did not create a screenshot."
-        echo "Screen Recording permission may not be available."
-    fi
-
-    echo
-    echo "========================================"
-    echo " Generating access token"
+    echo " Generating token"
     echo "========================================"
 
     TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
 
     export CONTROL_TOKEN="$TOKEN"
 
-    echo "Token generated."
-
-    echo
     echo "========================================"
-    echo " Starting macOS GUI controller"
+    echo " Starting server"
     echo "========================================"
 
     python server.py \
@@ -545,58 +424,34 @@ PYTHON
     sleep 5
 
     if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-
-        echo "GUI server failed to start."
-
-        cat \
-          "$HOME/maccontrol/server.log"
-
+        echo "Server failed:"
+        cat "$HOME/maccontrol/server.log"
         exit 1
     fi
 
-    echo "GUI server is running."
-    echo "PID: $SERVER_PID"
+    echo "Server started."
 
-    echo
     echo "========================================"
-    echo " Waiting for screenshot"
+    echo " Testing screenshot"
     echo "========================================"
 
-    for i in $(seq 1 20); do
+    /usr/sbin/screencapture \
+      -x \
+      /tmp/test.png \
+      || true
 
-        if [ -s /tmp/maccontrol-screen.png ]; then
-            echo "Screenshot available."
-            break
-        fi
-
-        sleep 1
-    done
-
-    if [ -s /tmp/maccontrol-screen.png ]; then
-
-        file \
-          /tmp/maccontrol-screen.png \
-          || true
-
+    if [ -f /tmp/test.png ]; then
+        echo "Screenshot works."
         sips \
           -g pixelWidth \
           -g pixelHeight \
-          /tmp/maccontrol-screen.png \
-          || true
-
+          /tmp/test.png
     else
-
-        echo "WARNING: screenshot unavailable."
-
-        tail -50 \
-          "$HOME/maccontrol/server.log" \
-          || true
-
+        echo "WARNING: Screenshot unavailable."
     fi
 
-    echo
     echo "========================================"
-    echo " Installing cloudflared ARM64"
+    echo " Installing ARM64 cloudflared"
     echo "========================================"
 
     mkdir -p "$HOME/cloudflared"
@@ -614,13 +469,11 @@ PYTHON
     chmod +x \
       "$HOME/cloudflared/cloudflared"
 
-    echo "cloudflared architecture:"
-    file \
-      "$HOME/cloudflared/cloudflared"
+    echo "cloudflared:"
+    file "$HOME/cloudflared/cloudflared"
 
-    echo
     echo "========================================"
-    echo " Starting public tunnel"
+    echo " Starting Cloudflare tunnel"
     echo "========================================"
 
     "$HOME/cloudflared/cloudflared" \
@@ -631,21 +484,9 @@ PYTHON
 
     TUNNEL_PID=$!
 
-    echo "Tunnel PID: $TUNNEL_PID"
-
-    echo
-    echo "Waiting for tunnel URL..."
-
     URL=""
 
     for i in $(seq 1 60); do
-
-        if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
-            echo "cloudflared stopped unexpectedly."
-            cat "$HOME/cloudflared.log"
-            exit 1
-        fi
-
         URL="$(
             grep -oE \
               'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
@@ -663,87 +504,39 @@ PYTHON
 
     echo
     echo "========================================"
-    echo "        MAC DESKTOP CONTROL"
+    echo "          MAC DESKTOP URL"
     echo "========================================"
 
     if [ -n "$URL" ]; then
-
-        echo
-        echo "OPEN THIS URL:"
         echo
         echo "${URL}/?token=${TOKEN}"
         echo
-
     else
-
-        echo "Tunnel URL was not detected."
-
+        echo "Tunnel URL not found."
         echo
-        echo "--- cloudflared log ---"
-
-        cat \
-          "$HOME/cloudflared.log" \
-          || true
-
+        cat "$HOME/cloudflared.log"
         exit 1
     fi
 
-    echo
     echo "========================================"
-    echo " Diagnostics"
-    echo "========================================"
-
-    echo "Architecture:"
-    uname -m
-
-    echo
-    echo "macOS:"
-    sw_vers
-
-    echo
-    echo "Server:"
-    ps -p "$SERVER_PID" \
-      -o pid=,command= \
-      || true
-
-    echo
-    echo "Tunnel:"
-    ps -p "$TUNNEL_PID" \
-      -o pid=,command= \
-      || true
-
-    echo
-    echo "========================================"
-    echo "            RUNNING"
+    echo " RUNNING"
     echo "========================================"
 
     while true; do
-
         if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-
-            echo "GUI server stopped."
-
-            tail -100 \
-              "$HOME/maccontrol/server.log" \
-              || true
-
+            echo "Server stopped."
+            cat "$HOME/maccontrol/server.log"
             exit 1
         fi
 
         if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
-
-            echo "cloudflared stopped."
-
-            tail -100 \
-              "$HOME/cloudflared.log" \
-              || true
-
+            echo "Tunnel stopped."
+            cat "$HOME/cloudflared.log"
             exit 1
         fi
 
         sleep 10
-
     done
 
-  displayName: "Start browser-controlled macOS desktop"
+  displayName: 'Start browser-controlled macOS desktop'
   timeoutInMinutes: 55
