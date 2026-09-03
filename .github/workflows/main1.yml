@@ -8,13 +8,13 @@ jobs:
     runs-on: macos-14
 
     steps:
-      - name: Start macOS control server
+      - name: Start macOS browser-controlled desktop
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           echo "========================================"
-          echo " macOS runner"
+          echo " macOS information"
           echo "========================================"
 
           uname -m
@@ -22,7 +22,7 @@ jobs:
           whoami
 
           echo "========================================"
-          echo " Python"
+          echo " Installing Python"
           echo "========================================"
 
           python3 -m venv "$HOME/maccontrol-venv"
@@ -34,8 +34,9 @@ jobs:
           mkdir -p "$HOME/maccontrol"
           cd "$HOME/maccontrol"
 
-          TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
-          export MACCONTROL_TOKEN="$TOKEN"
+          echo "========================================"
+          echo " Creating server.py"
+          echo "========================================"
 
           cat > server.py <<'PYTHON'
 import os
@@ -49,12 +50,16 @@ import Quartz
 
 app = Flask(__name__)
 
-TOKEN = os.environ["MACCONTROL_TOKEN"]
+TOKEN = os.environ.get("MACCONTROL_TOKEN", "")
 SCREEN = "/tmp/maccontrol-screen.png"
 
 
 def authorized():
     supplied = request.args.get("token", "")
+
+    if not TOKEN:
+        return False
+
     return secrets.compare_digest(supplied, TOKEN)
 
 
@@ -68,13 +73,16 @@ def screenshot_loop():
                 timeout=5,
             )
         except Exception as e:
-            print("Screenshot error:", e, flush=True)
+            print(f"Screenshot error: {e}", flush=True)
 
         time.sleep(0.5)
 
 
 def click_mouse(x, y):
-    point = Quartz.CGPoint(float(x), float(y))
+    point = Quartz.CGPoint(
+        float(x),
+        float(y)
+    )
 
     down = Quartz.CGEventCreateMouseEvent(
         None,
@@ -90,8 +98,15 @@ def click_mouse(x, y):
         Quartz.kCGMouseButtonLeft,
     )
 
-    Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)
-    Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
+    Quartz.CGEventPost(
+        Quartz.kCGHIDEventTap,
+        down
+    )
+
+    Quartz.CGEventPost(
+        Quartz.kCGHIDEventTap,
+        up
+    )
 
 
 def type_text(text):
@@ -129,45 +144,47 @@ def index():
 <title>macOS Control</title>
 
 <style>
-html,body {
-    margin:0;
-    padding:0;
-    background:#111;
-    color:#fff;
-    font-family:-apple-system,BlinkMacSystemFont,sans-serif;
+html, body {
+    margin: 0;
+    padding: 0;
+    background: #111;
+    color: white;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
 }
 
 #toolbar {
-    height:52px;
-    background:#222;
-    display:flex;
-    align-items:center;
-    gap:8px;
-    padding:0 12px;
-    box-sizing:border-box;
+    height: 52px;
+    background: #222;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 12px;
+    box-sizing: border-box;
 }
 
 #screen {
-    display:block;
-    max-width:100vw;
-    max-height:calc(100vh - 52px);
-    margin:auto;
-    cursor:crosshair;
+    display: block;
+    max-width: 100vw;
+    max-height: calc(100vh - 52px);
+    margin: auto;
+    cursor: crosshair;
+    user-select: none;
 }
 
 input {
-    background:#333;
-    color:#fff;
-    border:1px solid #555;
-    padding:7px;
+    background: #333;
+    color: white;
+    border: 1px solid #555;
+    padding: 7px;
+    width: 220px;
 }
 
 button {
-    padding:7px 12px;
+    padding: 7px 12px;
 }
 
 #status {
-    margin-left:8px;
+    margin-left: 8px;
 }
 </style>
 </head>
@@ -210,11 +227,13 @@ async function refresh() {
             encodeURIComponent(token) +
             "&t=" +
             Date.now(),
-            {cache:"no-store"}
+            {
+                cache: "no-store"
+            }
         );
 
         if (!response.ok) {
-            status.textContent = "Error";
+            status.textContent = "Error " + response.status;
             return;
         }
 
@@ -240,7 +259,7 @@ setInterval(refresh, 500);
 refresh();
 
 
-img.addEventListener("click", async (event) => {
+img.addEventListener("click", async function(event) {
     const rect = img.getBoundingClientRect();
 
     const x =
@@ -253,20 +272,24 @@ img.addEventListener("click", async (event) => {
         img.naturalHeight /
         rect.height;
 
-    await fetch(
-        "/click?token=" +
-        encodeURIComponent(token),
-        {
-            method:"POST",
-            headers:{
-                "Content-Type":"application/json"
-            },
-            body:JSON.stringify({
-                x:x,
-                y:y
-            })
-        }
-    );
+    try {
+        await fetch(
+            "/click?token=" +
+            encodeURIComponent(token),
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    x: x,
+                    y: y
+                })
+            }
+        );
+    } catch (error) {
+        status.textContent = "Click failed";
+    }
 });
 
 
@@ -280,44 +303,53 @@ async function sendText() {
         return;
     }
 
-    await fetch(
-        "/type?token=" +
-        encodeURIComponent(token),
-        {
-            method:"POST",
-            headers:{
-                "Content-Type":"application/json"
-            },
-            body:JSON.stringify({
-                text:text
-            })
-        }
-    );
+    try {
+        await fetch(
+            "/type?token=" +
+            encodeURIComponent(token),
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    text: text
+                })
+            }
+        );
 
-    input.value = "";
+        input.value = "";
+
+    } catch (error) {
+        status.textContent = "Typing failed";
+    }
 }
 
 
-document.addEventListener("keydown", async (event) => {
+document.addEventListener("keydown", async function(event) {
     if (event.target.tagName === "INPUT") {
         return;
     }
 
     event.preventDefault();
 
-    await fetch(
-        "/type?token=" +
-        encodeURIComponent(token),
-        {
-            method:"POST",
-            headers:{
-                "Content-Type":"application/json"
-            },
-            body:JSON.stringify({
-                text:event.key
-            })
-        }
-    );
+    try {
+        await fetch(
+            "/type?token=" +
+            encodeURIComponent(token),
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    text: event.key
+                })
+            }
+        );
+    } catch (error) {
+        status.textContent = "Keyboard failed";
+    }
 });
 </script>
 
@@ -338,7 +370,9 @@ def screen():
         return Response(
             data,
             mimetype="image/png",
-            headers={"Cache-Control":"no-store"},
+            headers={
+                "Cache-Control": "no-store"
+            },
         )
 
     except FileNotFoundError:
@@ -389,12 +423,22 @@ app.run(
 PYTHON
 
           echo "========================================"
-          echo " Checking Python"
+          echo " Checking server.py"
           echo "========================================"
 
           python -m py_compile server.py
 
           echo "Python syntax OK."
+
+          echo "========================================"
+          echo " Generating token"
+          echo "========================================"
+
+          TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+
+          export MACCONTROL_TOKEN="$TOKEN"
+
+          echo "Token generated."
 
           echo "========================================"
           echo " Starting Flask"
@@ -409,6 +453,7 @@ PYTHON
 
           if ! kill -0 "$SERVER_PID" 2>/dev/null; then
               echo "Flask failed to start."
+              echo
               cat "$HOME/maccontrol/server.log"
               exit 1
           fi
@@ -416,25 +461,48 @@ PYTHON
           echo "Flask started."
 
           echo "========================================"
-          echo " Testing authentication"
+          echo " Testing Flask"
           echo "========================================"
 
           STATUS="$(
             curl \
               -s \
-              -o /dev/null \
+              -o /tmp/maccontrol-test.html \
               -w "%{http_code}" \
               "http://127.0.0.1:8080/?token=${TOKEN}"
           )"
 
+          echo "HTTP status: $STATUS"
+
           if [ "$STATUS" != "200" ]; then
-              echo "Authentication test failed."
-              echo "HTTP status: $STATUS"
+              echo "Flask authentication test failed."
               cat "$HOME/maccontrol/server.log"
               exit 1
           fi
 
-          echo "Authentication works."
+          echo "Flask is working."
+
+          echo "========================================"
+          echo " Testing screenshot"
+          echo "========================================"
+
+          /usr/sbin/screencapture \
+            -x \
+            "$SCREEN" \
+            || true
+
+          if [ -f "$SCREEN" ]; then
+              echo "Screenshot file created."
+
+              sips \
+                -g pixelWidth \
+                -g pixelHeight \
+                "$SCREEN" \
+                || true
+          else
+              echo "WARNING: screenshot file was not created."
+              echo "This can happen when the GitHub runner has no GUI."
+          fi
 
           echo "========================================"
           echo " Installing cloudflared"
@@ -442,37 +510,53 @@ PYTHON
 
           mkdir -p "$HOME/cloudflared"
 
-          curl -L \
+          curl \
+            -L \
             --fail \
             --retry 3 \
-            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz \
+            "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz" \
             -o "$HOME/cloudflared.tgz"
 
-          tar -xzf \
+          tar \
+            -xzf \
             "$HOME/cloudflared.tgz" \
             -C "$HOME/cloudflared"
 
-          chmod +x "$HOME/cloudflared/cloudflared"
+          chmod +x \
+            "$HOME/cloudflared/cloudflared"
+
+          echo "cloudflared version:"
 
           "$HOME/cloudflared/cloudflared" --version
 
           echo "========================================"
-          echo " Starting Cloudflare"
+          echo " Starting Cloudflare tunnel"
           echo "========================================"
 
           "$HOME/cloudflared/cloudflared" \
             tunnel \
             --no-autoupdate \
-            --url http://127.0.0.1:8080 \
+            --url "http://127.0.0.1:8080" \
             > "$HOME/cloudflared.log" 2>&1 &
 
           TUNNEL_PID=$!
 
+          echo "Cloudflare PID: $TUNNEL_PID"
+
           URL=""
 
           for i in $(seq 1 60); do
+
+              if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
+                  echo "cloudflared exited."
+
+                  cat "$HOME/cloudflared.log"
+
+                  exit 1
+              fi
+
               URL="$(
-                grep -oE \
+                grep -Eo \
                   'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
                   "$HOME/cloudflared.log" |
                 head -1 ||
@@ -483,12 +567,19 @@ PYTHON
                   break
               fi
 
+              echo "Waiting for Cloudflare tunnel... ($i/60)"
+
               sleep 2
+
           done
 
           if [ -z "$URL" ]; then
+              echo
               echo "Cloudflare URL was not found."
+              echo
+              echo "========== cloudflared.log =========="
               cat "$HOME/cloudflared.log"
+              echo "======================================"
               exit 1
           fi
 
@@ -502,19 +593,24 @@ PYTHON
           echo "========================================"
           echo " RUNNING"
           echo "========================================"
+          echo
 
           while true; do
+
               if ! kill -0 "$SERVER_PID" 2>/dev/null; then
                   echo "Flask stopped."
+                  echo
                   cat "$HOME/maccontrol/server.log"
                   exit 1
               fi
 
               if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
                   echo "Cloudflare stopped."
+                  echo
                   cat "$HOME/cloudflared.log"
                   exit 1
               fi
 
               sleep 10
+
           done
