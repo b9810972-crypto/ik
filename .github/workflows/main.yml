@@ -6,7 +6,7 @@ on:
 jobs:
   macos:
     # Apple Silicon macOS runner
-    runs-on: macos-26
+    runs-on: macos-14-large
 
     steps:
       - name: Start macOS browser-controlled desktop
