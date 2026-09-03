@@ -1,252 +1,576 @@
-name: macOS
+pool:
+  name: 'GitHub-hosted Agents'
+  vmImage: 'macos-26-arm64'
 
-on:
-  workflow_dispatch:
+steps:
+- checkout: none
 
-jobs:
-  macos:
-    runs-on: macos-14
+- bash: |
+    set -euo pipefail
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    echo "========================================"
+    echo " macOS information"
+    echo "========================================"
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
+    uname -m
+    sw_vers
+    whoami
 
-      - name: Install dependencies
-        shell: bash
-        run: |
-          set -e
+    echo "========================================"
+    echo " Installing Python packages"
+    echo "========================================"
 
-          python -m pip install --upgrade pip
-          python -m pip install Flask pyobjc-framework-Quartz
+    python3 -m venv "$HOME/maccontrol-venv"
+    source "$HOME/maccontrol-venv/bin/activate"
 
-      - name: Check server.py
-        shell: bash
-        run: |
-          set -e
+    python -m pip install --upgrade pip
+    python -m pip install Flask pyobjc-framework-Quartz
 
-          if [ ! -f server.py ]; then
-            echo "server.py was not found."
-            echo "Put server.py in the root of the repository."
+    mkdir -p "$HOME/maccontrol"
+    cd "$HOME/maccontrol"
+
+    cat > server.py <<'PYTHON'
+import os
+import time
+import threading
+import secrets
+import subprocess
+
+from flask import Flask, request, Response
+import Quartz
+
+app = Flask(__name__)
+
+TOKEN = os.environ["CONTROL_TOKEN"]
+SCREEN = "/tmp/maccontrol-screen.png"
+
+
+def authorized():
+    supplied = request.args.get("token", "")
+
+    if not TOKEN:
+        return False
+
+    return secrets.compare_digest(supplied, TOKEN)
+
+
+def screenshot_loop():
+    while True:
+        try:
+            subprocess.run(
+                ["/usr/sbin/screencapture", "-x", SCREEN],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5
+            )
+        except Exception as e:
+            print(f"Screenshot error: {e}", flush=True)
+
+        time.sleep(0.3)
+
+
+def click(x, y):
+    point = Quartz.CGPoint(
+        float(x),
+        float(y)
+    )
+
+    down = Quartz.CGEventCreateMouseEvent(
+        None,
+        Quartz.kCGEventLeftMouseDown,
+        point,
+        Quartz.kCGMouseButtonLeft
+    )
+
+    up = Quartz.CGEventCreateMouseEvent(
+        None,
+        Quartz.kCGEventLeftMouseUp,
+        point,
+        Quartz.kCGMouseButtonLeft
+    )
+
+    Quartz.CGEventPost(
+        Quartz.kCGHIDEventTap,
+        down
+    )
+
+    Quartz.CGEventPost(
+        Quartz.kCGHIDEventTap,
+        up
+    )
+
+
+def type_text(text):
+    for char in text:
+        event = Quartz.CGEventCreateKeyboardEvent(
+            None,
+            0,
+            True
+        )
+
+        Quartz.CGEventKeyboardSetUnicodeString(
+            event,
+            len(char),
+            char
+        )
+
+        Quartz.CGEventPost(
+            Quartz.kCGHIDEventTap,
+            event
+        )
+
+        time.sleep(0.005)
+
+
+@app.route("/")
+def index():
+    if not authorized():
+        return "Unauthorized", 401
+
+    return """
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>macOS Control</title>
+
+<style>
+html, body {
+    margin: 0;
+    padding: 0;
+    background: #111;
+    color: white;
+    font-family: Arial, sans-serif;
+}
+
+#bar {
+    height: 50px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 10px;
+    background: #222;
+}
+
+#screen {
+    display: block;
+    max-width: 100vw;
+    max-height: calc(100vh - 50px);
+    margin: auto;
+    cursor: crosshair;
+    user-select: none;
+}
+
+input {
+    background: #333;
+    color: white;
+    border: 1px solid #555;
+    padding: 7px;
+    width: 220px;
+}
+
+button {
+    padding: 7px 12px;
+}
+</style>
+</head>
+
+<body>
+
+<div id="bar">
+    <b>macOS</b>
+
+    <input
+        id="text"
+        placeholder="Type text">
+
+    <button onclick="sendText()">
+        Type
+    </button>
+
+    <span id="status">
+        Connecting...
+    </span>
+</div>
+
+<img id="screen" draggable="false">
+
+<script>
+const token =
+    new URLSearchParams(location.search).get("token") || "";
+
+const img =
+    document.getElementById("screen");
+
+const status =
+    document.getElementById("status");
+
+
+async function refresh() {
+    try {
+        const r = await fetch(
+            "/screen?token=" +
+            encodeURIComponent(token) +
+            "&t=" +
+            Date.now(),
+            {
+                cache: "no-store"
+            }
+        );
+
+        if (!r.ok) {
+            status.textContent = "Error " + r.status;
+            return;
+        }
+
+        const blob = await r.blob();
+
+        const old = img.src;
+
+        img.src = URL.createObjectURL(blob);
+
+        if (old.startsWith("blob:")) {
+            URL.revokeObjectURL(old);
+        }
+
+        status.textContent = "Connected";
+
+    } catch (e) {
+        status.textContent = "Disconnected";
+    }
+}
+
+
+setInterval(refresh, 300);
+refresh();
+
+
+img.addEventListener("click", async function(event) {
+    const rect = img.getBoundingClientRect();
+
+    const x =
+        (event.clientX - rect.left) *
+        img.naturalWidth /
+        rect.width;
+
+    const y =
+        (event.clientY - rect.top) *
+        img.naturalHeight /
+        rect.height;
+
+    await fetch(
+        "/click?token=" +
+        encodeURIComponent(token),
+        {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                x: x,
+                y: y
+            })
+        }
+    );
+});
+
+
+async function sendText() {
+    const input =
+        document.getElementById("text");
+
+    const text = input.value;
+
+    if (!text) {
+        return;
+    }
+
+    await fetch(
+        "/type?token=" +
+        encodeURIComponent(token),
+        {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                text: text
+            })
+        }
+    );
+
+    input.value = "";
+}
+
+
+document.addEventListener("keydown", async function(event) {
+    if (event.target.tagName === "INPUT") {
+        return;
+    }
+
+    event.preventDefault();
+
+    await fetch(
+        "/type?token=" +
+        encodeURIComponent(token),
+        {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                text: event.key
+            })
+        }
+    );
+});
+</script>
+
+</body>
+</html>
+"""
+
+
+@app.route("/screen")
+def screen():
+    if not authorized():
+        return "Unauthorized", 401
+
+    try:
+        with open(SCREEN, "rb") as f:
+            data = f.read()
+
+        return Response(
+            data,
+            mimetype="image/png",
+            headers={
+                "Cache-Control": "no-store"
+            }
+        )
+
+    except FileNotFoundError:
+        return "No screenshot", 503
+
+
+@app.route("/click", methods=["POST"])
+def click_route():
+    if not authorized():
+        return "Unauthorized", 401
+
+    data = request.get_json(force=True)
+
+    click(
+        data["x"],
+        data["y"]
+    )
+
+    return "OK"
+
+
+@app.route("/type", methods=["POST"])
+def type_route():
+    if not authorized():
+        return "Unauthorized", 401
+
+    data = request.get_json(force=True)
+
+    type_text(
+        data.get("text", "")
+    )
+
+    return "OK"
+
+
+threading.Thread(
+    target=screenshot_loop,
+    daemon=True
+).start()
+
+
+app.run(
+    host="127.0.0.1",
+    port=8080,
+    debug=False,
+    threaded=True
+)
+PYTHON
+
+    echo "========================================"
+    echo " Checking Python"
+    echo "========================================"
+
+    python -m py_compile server.py
+
+    echo "Python syntax OK."
+
+    echo "========================================"
+    echo " Generating token"
+    echo "========================================"
+
+    TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+
+    export CONTROL_TOKEN="$TOKEN"
+
+    echo "========================================"
+    echo " Starting server"
+    echo "========================================"
+
+    python server.py \
+      > "$HOME/maccontrol/server.log" 2>&1 &
+
+    SERVER_PID=$!
+
+    sleep 5
+
+    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+        echo "Server failed:"
+        cat "$HOME/maccontrol/server.log"
+        exit 1
+    fi
+
+    echo "Server started."
+
+    echo "========================================"
+    echo " Testing server"
+    echo "========================================"
+
+    STATUS="$(
+      curl \
+        -s \
+        -o /dev/null \
+        -w "%{http_code}" \
+        "http://127.0.0.1:8080/?token=${TOKEN}"
+    )"
+
+    echo "HTTP status: $STATUS"
+
+    if [ "$STATUS" != "200" ]; then
+        echo "Server test failed."
+        cat "$HOME/maccontrol/server.log"
+        exit 1
+    fi
+
+    echo "Server responds successfully."
+
+    echo "========================================"
+    echo " Testing screenshot"
+    echo "========================================"
+
+    /usr/sbin/screencapture \
+      -x \
+      /tmp/test.png \
+      || true
+
+    if [ -f /tmp/test.png ]; then
+        echo "Screenshot works."
+
+        sips \
+          -g pixelWidth \
+          -g pixelHeight \
+          /tmp/test.png \
+          || true
+    else
+        echo "WARNING: Screenshot unavailable."
+    fi
+
+    echo "========================================"
+    echo " Installing ARM64 cloudflared"
+    echo "========================================"
+
+    mkdir -p "$HOME/cloudflared"
+
+    curl -L \
+      --fail \
+      --retry 3 \
+      "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz" \
+      -o "$HOME/cloudflared.tgz"
+
+    tar -xzf \
+      "$HOME/cloudflared.tgz" \
+      -C "$HOME/cloudflared"
+
+    chmod +x \
+      "$HOME/cloudflared/cloudflared"
+
+    echo "cloudflared:"
+    file "$HOME/cloudflared/cloudflared"
+
+    "$HOME/cloudflared/cloudflared" --version
+
+    echo "========================================"
+    echo " Starting Cloudflare tunnel"
+    echo "========================================"
+
+    "$HOME/cloudflared/cloudflared" \
+      tunnel \
+      --no-autoupdate \
+      --url "http://127.0.0.1:8080" \
+      > "$HOME/cloudflared.log" 2>&1 &
+
+    TUNNEL_PID=$!
+
+    URL=""
+
+    for i in $(seq 1 60); do
+
+        if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
+            echo "Cloudflare tunnel stopped."
+            cat "$HOME/cloudflared.log"
             exit 1
-          fi
+        fi
 
-          python -m py_compile server.py
+        URL="$(
+            grep -oE \
+              'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
+              "$HOME/cloudflared.log" |
+            head -1 ||
+            true
+        )"
 
-          echo "server.py syntax OK."
+        if [ -n "$URL" ]; then
+            break
+        fi
 
-      - name: Start Flask server
-        shell: bash
-        run: |
-          set -e
+        sleep 2
+    done
 
-          python server.py > /tmp/server.log 2>&1 &
-          SERVER_PID=$!
+    echo
+    echo "========================================"
+    echo "          MAC DESKTOP URL"
+    echo "========================================"
 
-          echo "$SERVER_PID" > /tmp/server.pid
+    if [ -n "$URL" ]; then
+        echo
+        echo "${URL}/?token=${TOKEN}"
+        echo
+    else
+        echo "Tunnel URL not found."
+        echo
+        cat "$HOME/cloudflared.log"
+        exit 1
+    fi
 
-          echo "Waiting for Flask..."
+    echo "========================================"
+    echo " RUNNING"
+    echo "========================================"
 
-          for i in $(seq 1 30); do
-            if curl --silent --fail \
-              http://127.0.0.1:8080/ \
-              >/dev/null 2>&1; then
+    while true; do
 
-              echo "Flask server is running."
-              exit 0
-            fi
-
-            if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-              echo "Flask server exited."
-
-              echo "========== SERVER LOG =========="
-              cat /tmp/server.log
-              exit 1
-            fi
-
-            sleep 1
-          done
-
-          echo "Flask server did not start."
-
-          echo "========== SERVER LOG =========="
-          cat /tmp/server.log
-
-          exit 1
-
-      - name: Test Flask server
-        shell: bash
-        run: |
-          set -e
-
-          curl --fail \
-            --silent \
-            --show-error \
-            http://127.0.0.1:8080/ \
-            -o /tmp/test.html
-
-          echo "Flask test passed."
-
-          echo "========== RESPONSE =========="
-
-          head -20 /tmp/test.html
-
-      - name: Test macOS screenshot
-        shell: bash
-        run: |
-          set +e
-
-          /usr/sbin/screencapture \
-            -x \
-            /tmp/test-screen.png
-
-          RESULT=$?
-
-          if [ "$RESULT" -eq 0 ] && [ -f /tmp/test-screen.png ]; then
-            echo "Screenshot command succeeded."
-
-            sips \
-              -g pixelWidth \
-              -g pixelHeight \
-              /tmp/test-screen.png
-          else
-            echo "Screenshot is unavailable on this runner."
-            echo "This does not necessarily mean Flask failed."
-          fi
-
-      - name: Install cloudflared
-        shell: bash
-        run: |
-          set -e
-
-          mkdir -p "$HOME/cloudflared"
-
-          curl -L \
-            --fail \
-            --retry 3 \
-            "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz" \
-            -o /tmp/cloudflared.tgz
-
-          tar -xzf \
-            /tmp/cloudflared.tgz \
-            -C "$HOME/cloudflared"
-
-          chmod +x \
-            "$HOME/cloudflared/cloudflared"
-
-          echo "cloudflared installed."
-
-          "$HOME/cloudflared/cloudflared" --version
-
-      - name: Start Cloudflare tunnel
-        shell: bash
-        run: |
-          set -e
-
-          "$HOME/cloudflared/cloudflared" \
-            tunnel \
-            --no-autoupdate \
-            --url http://127.0.0.1:8080 \
-            > /tmp/cloudflared.log 2>&1 &
-
-          TUNNEL_PID=$!
-
-          echo "$TUNNEL_PID" > /tmp/cloudflared.pid
-
-          echo "Waiting for Cloudflare tunnel URL..."
-
-          URL=""
-
-          for i in $(seq 1 60); do
-
-            if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
-              echo "cloudflared exited early."
-
-              echo "========== CLOUDFLARED LOG =========="
-              cat /tmp/cloudflared.log
-
-              exit 1
-            fi
-
-            URL="$(
-              grep -oE \
-                'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
-                /tmp/cloudflared.log |
-              head -1 ||
-              true
-            )"
-
-            if [ -n "$URL" ]; then
-              break
-            fi
-
-            sleep 2
-          done
-
-          if [ -z "$URL" ]; then
-            echo "Could not find Cloudflare URL."
-
-            echo "========== CLOUDFLARED LOG =========="
-
-            cat /tmp/cloudflared.log
-
+        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+            echo "Server stopped."
+            cat "$HOME/maccontrol/server.log"
             exit 1
-          fi
+        fi
 
-          echo
-          echo "=========================================="
-          echo "        MACOS FLASK SERVER"
-          echo "=========================================="
-          echo
-          echo "$URL"
-          echo
-          echo "=========================================="
-          echo "        SCREENSHOT ENDPOINT"
-          echo "=========================================="
-          echo
-          echo "$URL/screen"
-          echo
-          echo "=========================================="
+        if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
+            echo "Tunnel stopped."
+            cat "$HOME/cloudflared.log"
+            exit 1
+        fi
 
-      - name: Keep tunnel alive
-        shell: bash
-        run: |
-          set -e
+        sleep 10
 
-          echo "Tunnel is running."
+    done
 
-          while true; do
-
-            if [ -f /tmp/server.pid ]; then
-              SERVER_PID="$(cat /tmp/server.pid)"
-
-              if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-                echo "Flask server stopped."
-
-                echo "========== SERVER LOG =========="
-                cat /tmp/server.log
-
-                exit 1
-              fi
-            fi
-
-            if [ -f /tmp/cloudflared.pid ]; then
-              TUNNEL_PID="$(cat /tmp/cloudflared.pid)"
-
-              if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
-                echo "Cloudflare tunnel stopped."
-
-                echo "========== CLOUDFLARED LOG =========="
-                cat /tmp/cloudflared.log
-
-                exit 1
-              fi
-            fi
-
-            sleep 10
-
-          done
+  displayName: 'Start browser-controlled macOS desktop'
+  timeoutInMinutes: 55
