@@ -1,0 +1,252 @@
+name: macOS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -e
+
+          python -m pip install --upgrade pip
+          python -m pip install Flask pyobjc-framework-Quartz
+
+      - name: Check server.py
+        shell: bash
+        run: |
+          set -e
+
+          if [ ! -f server.py ]; then
+            echo "server.py was not found."
+            echo "Put server.py in the root of the repository."
+            exit 1
+          fi
+
+          python -m py_compile server.py
+
+          echo "server.py syntax OK."
+
+      - name: Start Flask server
+        shell: bash
+        run: |
+          set -e
+
+          python server.py > /tmp/server.log 2>&1 &
+          SERVER_PID=$!
+
+          echo "$SERVER_PID" > /tmp/server.pid
+
+          echo "Waiting for Flask..."
+
+          for i in $(seq 1 30); do
+            if curl --silent --fail \
+              http://127.0.0.1:8080/ \
+              >/dev/null 2>&1; then
+
+              echo "Flask server is running."
+              exit 0
+            fi
+
+            if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+              echo "Flask server exited."
+
+              echo "========== SERVER LOG =========="
+              cat /tmp/server.log
+              exit 1
+            fi
+
+            sleep 1
+          done
+
+          echo "Flask server did not start."
+
+          echo "========== SERVER LOG =========="
+          cat /tmp/server.log
+
+          exit 1
+
+      - name: Test Flask server
+        shell: bash
+        run: |
+          set -e
+
+          curl --fail \
+            --silent \
+            --show-error \
+            http://127.0.0.1:8080/ \
+            -o /tmp/test.html
+
+          echo "Flask test passed."
+
+          echo "========== RESPONSE =========="
+
+          head -20 /tmp/test.html
+
+      - name: Test macOS screenshot
+        shell: bash
+        run: |
+          set +e
+
+          /usr/sbin/screencapture \
+            -x \
+            /tmp/test-screen.png
+
+          RESULT=$?
+
+          if [ "$RESULT" -eq 0 ] && [ -f /tmp/test-screen.png ]; then
+            echo "Screenshot command succeeded."
+
+            sips \
+              -g pixelWidth \
+              -g pixelHeight \
+              /tmp/test-screen.png
+          else
+            echo "Screenshot is unavailable on this runner."
+            echo "This does not necessarily mean Flask failed."
+          fi
+
+      - name: Install cloudflared
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p "$HOME/cloudflared"
+
+          curl -L \
+            --fail \
+            --retry 3 \
+            "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz" \
+            -o /tmp/cloudflared.tgz
+
+          tar -xzf \
+            /tmp/cloudflared.tgz \
+            -C "$HOME/cloudflared"
+
+          chmod +x \
+            "$HOME/cloudflared/cloudflared"
+
+          echo "cloudflared installed."
+
+          "$HOME/cloudflared/cloudflared" --version
+
+      - name: Start Cloudflare tunnel
+        shell: bash
+        run: |
+          set -e
+
+          "$HOME/cloudflared/cloudflared" \
+            tunnel \
+            --no-autoupdate \
+            --url http://127.0.0.1:8080 \
+            > /tmp/cloudflared.log 2>&1 &
+
+          TUNNEL_PID=$!
+
+          echo "$TUNNEL_PID" > /tmp/cloudflared.pid
+
+          echo "Waiting for Cloudflare tunnel URL..."
+
+          URL=""
+
+          for i in $(seq 1 60); do
+
+            if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
+              echo "cloudflared exited early."
+
+              echo "========== CLOUDFLARED LOG =========="
+              cat /tmp/cloudflared.log
+
+              exit 1
+            fi
+
+            URL="$(
+              grep -oE \
+                'https://[-a-zA-Z0-9]+\.trycloudflare\.com' \
+                /tmp/cloudflared.log |
+              head -1 ||
+              true
+            )"
+
+            if [ -n "$URL" ]; then
+              break
+            fi
+
+            sleep 2
+          done
+
+          if [ -z "$URL" ]; then
+            echo "Could not find Cloudflare URL."
+
+            echo "========== CLOUDFLARED LOG =========="
+
+            cat /tmp/cloudflared.log
+
+            exit 1
+          fi
+
+          echo
+          echo "=========================================="
+          echo "        MACOS FLASK SERVER"
+          echo "=========================================="
+          echo
+          echo "$URL"
+          echo
+          echo "=========================================="
+          echo "        SCREENSHOT ENDPOINT"
+          echo "=========================================="
+          echo
+          echo "$URL/screen"
+          echo
+          echo "=========================================="
+
+      - name: Keep tunnel alive
+        shell: bash
+        run: |
+          set -e
+
+          echo "Tunnel is running."
+
+          while true; do
+
+            if [ -f /tmp/server.pid ]; then
+              SERVER_PID="$(cat /tmp/server.pid)"
+
+              if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+                echo "Flask server stopped."
+
+                echo "========== SERVER LOG =========="
+                cat /tmp/server.log
+
+                exit 1
+              fi
+            fi
+
+            if [ -f /tmp/cloudflared.pid ]; then
+              TUNNEL_PID="$(cat /tmp/cloudflared.pid)"
+
+              if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
+                echo "Cloudflare tunnel stopped."
+
+                echo "========== CLOUDFLARED LOG =========="
+                cat /tmp/cloudflared.log
+
+                exit 1
+              fi
+            fi
+
+            sleep 10
+
+          done
